@@ -13,8 +13,10 @@ optdepends=('kubo: open .eth sites on IPFS'
             'networkmanager: handled by `enclavedns enable`')
 backup=('etc/enclavedns/config.toml')
 install=enclavedns.install
+# ring's C code built with makepkg's -flto is GCC bytecode the Rust linker cannot read
+options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('SKIP')  # the AUR copy pins the release tarball's sum
 
 prepare() {
   cd "enclavedns-client-$pkgver"

@@ -88,6 +88,7 @@ jobs:
         run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
       - run: ./gradlew --no-daemon assembleRelease
         working-directory: android
+        env:
           ENCLAVEDNS_VERSION: ${{ needs.version.outputs.version }}
           ENCLAVEDNS_VERSION_CODE: ${{ needs.version.outputs.code }}
           ENCLAVEDNS_KEYSTORE: ${{ runner.temp }}/release.jks
