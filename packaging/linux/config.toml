@@ -16,6 +16,8 @@
 # .eth sites are served here, over HTTPS from a CA that only covers .eth/.ens
 #gateway = "127.0.0.3"
 #https = true
+# `enclavedns status` reads the client here (plain HTTP on the gateway address)
+#status_port = 5380
 #redirect_https = true
 
 # Names only the local network knows. `enclavedns enable` adds the network's

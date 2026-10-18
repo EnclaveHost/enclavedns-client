@@ -39,6 +39,8 @@ pub struct Config {
     pub gateway: IpAddr,
     pub http_port: u16,
     pub https_port: u16,
+    /// `enclavedns status` reads the client's state here (plain HTTP)
+    pub status_port: u16,
     /// serve `.eth` sites over HTTPS from the local, .eth-only CA
     pub https: bool,
     /// send http:// `.eth` requests to https:// (the CA must be trusted)
@@ -115,6 +117,7 @@ impl Default for Config {
             gateway: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)),
             http_port: 80,
             https_port: 443,
+            status_port: 5380,
             https: true,
             redirect_https: true,
             state_dir: None,

@@ -43,6 +43,8 @@ pub struct Engine {
     pub tls: Option<Arc<rustls::ServerConfig>>,
     pub state_dir: PathBuf,
     pub counters: Mutex<Counters>,
+    /// gateway ports that could not be opened, and why
+    pub gateway_problems: Mutex<Vec<String>>,
     started: Instant,
 }
 
@@ -67,6 +69,7 @@ impl Engine {
             tls,
             state_dir: state_dir.to_path_buf(),
             counters: Mutex::default(),
+            gateway_problems: Mutex::default(),
             started: Instant::now(),
             cfg,
         }))
@@ -75,6 +78,11 @@ impl Engine {
     /// The CA certificate users trust for HTTPS on `.eth`.
     pub fn ca_cert_path(&self) -> PathBuf {
         self.state_dir.join(tls::CA_CERT)
+    }
+
+    fn gateway_problem(&self, p: String) {
+        eprintln!("enclavedns: .eth gateway: cannot listen on {p} (DNS is unaffected)");
+        self.gateway_problems.lock().unwrap().push(p);
     }
 
     /// The answer to one DNS message (UDP-sized), or None to drop it.
@@ -103,6 +111,7 @@ impl Engine {
             "queries": *self.counters.lock().unwrap(),
             "cache_entries": self.cache.len(),
             "gateway": self.cfg.gateway.to_string(),
+            "gateway_problems": self.gateway_problems.lock().unwrap().clone(),
             "https": self.tls.is_some(),
             "ca_cert": self.ca_cert_path().display().to_string(),
             "backends": b,
@@ -138,22 +147,37 @@ impl Engine {
                 }
             }
         }
+        // The .eth gateway is a convenience; DNS must never go down with it.
+        // A port that cannot be bound (on Windows, HTTP.sys often holds :80 on
+        // every address) is reported in `status` and the rest carries on.
         let gw = self.cfg.gateway;
-        let http = tokio::net::TcpListener::bind((gw, self.cfg.http_port))
-            .await
-            .map_err(|e| format!("cannot listen on {gw}:{}: {e}", self.cfg.http_port))?;
-        tasks.spawn(gateway::serve(http, self.clone(), None));
-        bound.push(format!("http {gw}:{}", self.cfg.http_port));
+        match tokio::net::TcpListener::bind((gw, self.cfg.http_port)).await {
+            Ok(l) => {
+                tasks.spawn(gateway::serve(l, self.clone(), None));
+                bound.push(format!("http {gw}:{}", self.cfg.http_port));
+            }
+            Err(e) => self.gateway_problem(format!("http {gw}:{}: {e}", self.cfg.http_port)),
+        }
+        // status (and the same pages) on a port of its own, for `enclavedns status`
+        match tokio::net::TcpListener::bind((gw, self.cfg.status_port)).await {
+            Ok(l) => {
+                tasks.spawn(gateway::serve(l, self.clone(), None));
+                bound.push(format!("status {gw}:{}", self.cfg.status_port));
+            }
+            Err(e) => self.gateway_problem(format!("status {gw}:{}: {e}", self.cfg.status_port)),
+        }
         if let Some(t) = &self.tls {
-            let https = tokio::net::TcpListener::bind((gw, self.cfg.https_port))
-                .await
-                .map_err(|e| format!("cannot listen on {gw}:{}: {e}", self.cfg.https_port))?;
-            tasks.spawn(gateway::serve(
-                https,
-                self.clone(),
-                Some(tokio_rustls::TlsAcceptor::from(t.clone())),
-            ));
-            bound.push(format!("https {gw}:{}", self.cfg.https_port));
+            match tokio::net::TcpListener::bind((gw, self.cfg.https_port)).await {
+                Ok(l) => {
+                    tasks.spawn(gateway::serve(
+                        l,
+                        self.clone(),
+                        Some(tokio_rustls::TlsAcceptor::from(t.clone())),
+                    ));
+                    bound.push(format!("https {gw}:{}", self.cfg.https_port));
+                }
+                Err(e) => self.gateway_problem(format!("https {gw}:{}: {e}", self.cfg.https_port)),
+            }
         }
         eprintln!(
             "enclavedns {}: {}; upstream {}",

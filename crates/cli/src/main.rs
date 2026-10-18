@@ -146,7 +146,7 @@ fn status(ctx: &Ctx) {
     };
     match rt.block_on(probe::http_get(
         &url_host,
-        cfg.http_port,
+        cfg.status_port,
         "/.well-known/enclavedns",
     )) {
         Ok(body) => {
@@ -170,6 +170,14 @@ fn status(ctx: &Ctx) {
                 "answers     {} from EnclaveDNS, {} from cache, {} from the fallback, {} local-network, {} failed",
                 q["enclavedns"], q["cached"], q["fallback"], q["forwarded"], q["failed"]
             );
+            if let Some(p) = v["gateway_problems"].as_array().filter(|p| !p.is_empty()) {
+                for x in p {
+                    println!(
+                        "gateway     cannot listen on {} (.eth sites need it; DNS is fine)",
+                        x.as_str().unwrap_or("?")
+                    );
+                }
+            }
             if let Some(b) = v["backends"].as_object() {
                 let s: Vec<String> = b
                     .iter()
