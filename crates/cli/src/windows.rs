@@ -454,15 +454,12 @@ pub fn watchdog(ctx: &Ctx) -> Result<(), String> {
 }
 
 fn wait_answering(server: std::net::SocketAddr) -> bool {
-    let rt = crate::runtime();
+    // THIS client, not another resolver on the same port
     for _ in 0..30 {
-        if rt
-            .block_on(probe::dns(server, "enclave.host", "A"))
-            .is_ok_and(|l| l.first().is_some_and(|h| h.contains("NoError")))
-        {
+        if probe::alive(server, 1) {
             return true;
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
     false
 }
@@ -480,6 +477,22 @@ pub fn enable(ctx: &Ctx) -> Result<(), String> {
             "nothing answers on {dns}; start the service: enclavedns service start"
         ));
     }
+    // the socket on 127.0.0.1:53 must be the EnclaveDNS service's own (another
+    // program, e.g. Internet Connection Sharing on 0.0.0.0:53, may also listen)
+    let owner = powershell(&format!(
+        "$svc = (Get-CimInstance Win32_Service -Filter \"Name='{NAME}'\").ProcessId; \
+         $ep = Get-NetUDPEndpoint -LocalAddress {ip} -LocalPort {port} -ErrorAction SilentlyContinue; \
+         if ($ep | Where-Object {{ $_.OwningProcess -eq $svc }}) {{ 'ours' }} else {{ 'other:' + (($ep | ForEach-Object OwningProcess) -join ',') }}",
+        ip = dns.ip(),
+        port = dns.port()
+    ))?;
+    if owner.trim() != "ours" {
+        return Err(format!(
+            "UDP {dns} is not held by the {NAME} service ({}); not changing DNS",
+            owner.trim()
+        ));
+    }
+    println!("   UDP {dns} belongs to the {NAME} service, and it answers as the client");
     println!("== 2/3 trust the .eth CA");
     let ca = ctx.state_dir.join(enclavedns_core::tls::CA_CERT);
     if ca.exists() {

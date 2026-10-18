@@ -278,13 +278,10 @@ fn write_managed_block(
     })
 }
 
-fn wait_answering(server: SocketAddr) -> bool {
-    let rt = crate::runtime();
+fn wait_answering(server: std::net::SocketAddr) -> bool {
+    // THIS client, not another resolver on the same port
     for _ in 0..30 {
-        if rt
-            .block_on(probe::dns(server, "enclave.host", "A"))
-            .is_ok_and(|l| l.first().is_some_and(|h| h.contains("NoError")))
-        {
+        if probe::alive(server, 1) {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_secs(1));

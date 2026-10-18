@@ -261,7 +261,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "enclavedns"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "enclavedns-core",
  "hickory-proto",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "enclavedns-android"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "enclavedns-core",
  "ipstack",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "enclavedns-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "hickory-proto",

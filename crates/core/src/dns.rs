@@ -24,6 +24,15 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
+/// A special-use name (RFC 6761 .invalid) only this client answers: its
+/// TXT record says "enclavedns-client=<version>". Probes ask it to know
+/// they reached the client and not some other resolver on port 53.
+pub const IDENTITY_NAME: &str = "enclavedns-client.invalid.";
+
+pub fn identity() -> String {
+    format!("enclavedns-client={}", env!("CARGO_PKG_VERSION"))
+}
+
 const SYNTH_TTL: u32 = 60;
 const UNREACHABLE_TTL: u32 = 5;
 const MAX_UDP: usize = 1232;
@@ -139,6 +148,19 @@ pub async fn answer(e: &Engine, wire: &[u8]) -> Option<Vec<u8>> {
     let qname = question.name().clone();
     if lower(&qname) == "use-application-dns.net." {
         return reply(&q, ResponseCode::NXDomain).to_vec().ok();
+    }
+    if lower(&qname) == IDENTITY_NAME {
+        // proves THIS client answers (not another resolver on the same port,
+        // e.g. Windows' Internet Connection Sharing proxy on 0.0.0.0:53)
+        let mut m = reply(&q, ResponseCode::NoError);
+        if question.query_type() == RecordType::TXT {
+            m.add_answer(Record::from_rdata(
+                qname,
+                0,
+                RData::TXT(hickory_proto::rr::rdata::TXT::new(vec![identity()])),
+            ));
+        }
+        return m.to_vec().ok();
     }
     let key = Key::of(&q);
     if let Some(k) = &key {

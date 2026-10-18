@@ -73,20 +73,25 @@ pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, Strin
         .map_err(|_| format!("{addr}: no answer"))?
 }
 
-/// Is the client process alive? A question it answers itself, without the
-/// network (Firefox's DoH canary): any DNS answer at all counts.
+/// Is THIS client answering on `dns`? It asks the name only the client
+/// answers (its identity TXT), so another resolver on the same port (on
+/// Windows, Internet Connection Sharing's proxy on 0.0.0.0:53) never passes.
 pub fn alive(dns: SocketAddr, tries: u32) -> bool {
     let rt = crate::runtime();
+    let want = enclavedns_core::dns::identity();
+    let name = enclavedns_core::dns::IDENTITY_NAME.trim_end_matches('.');
     for i in 0..tries {
         let ok = rt
             .block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(2),
-                    self::dns(dns, "use-application-dns.net", "A"),
-                )
-                .await
+                tokio::time::timeout(Duration::from_secs(2), self::dns(dns, name, "TXT")).await
             })
-            .is_ok_and(|r| r.is_ok());
+            .is_ok_and(|r| {
+                r.is_ok_and(|lines| {
+                    lines
+                        .iter()
+                        .any(|l| l.contains(want.as_str()) || l.contains("enclavedns-client="))
+                })
+            });
         if ok {
             return true;
         }

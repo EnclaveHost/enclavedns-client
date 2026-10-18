@@ -240,6 +240,9 @@ pub struct UpstreamStats {
 /// How long EnclaveDNS gets before a question goes to the fallback. ENS
 /// lookups behind it can take a few seconds when nothing is cached.
 const PRIMARY_WAIT: Duration = Duration::from_secs(7);
+/// For names the fallback can answer: a hung EnclaveDNS costs at most this
+/// before the system's own DNS answers (then PRIMARY_HOLD skips it).
+const PRIMARY_WAIT_FALLBACK: Duration = Duration::from_secs(3);
 const FALLBACK_WAIT: Duration = Duration::from_secs(5);
 /// After EnclaveDNS fails, how long to skip it (it is retried after).
 const PRIMARY_HOLD: Duration = Duration::from_secs(20);
@@ -334,7 +337,12 @@ impl Upstream {
         let mut err = String::new();
         if primary_only || !self.primary_down() || !self.can_fall_back() {
             let t0 = Instant::now();
-            match self.doh(&self.primary, q, PRIMARY_WAIT).await {
+            let wait = if primary_only || !self.can_fall_back() {
+                PRIMARY_WAIT
+            } else {
+                PRIMARY_WAIT_FALLBACK
+            };
+            match self.doh(&self.primary, q, wait).await {
                 Ok(b) => {
                     let mut s = self.stats.lock().unwrap();
                     s.primary_answers += 1;

@@ -1,6 +1,6 @@
 # Maintainer: stevedefacto (https://aur.archlinux.org/account/stevedefacto)
 pkgname=enclavedns
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="EnclaveDNS client: DNS through EnclaveDNS (DNSSEC validated in an attested enclave), and .eth sites in the browser"
 arch=('x86_64' 'aarch64')
