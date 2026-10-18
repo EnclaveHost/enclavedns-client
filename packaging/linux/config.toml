@@ -1,0 +1,33 @@
+# EnclaveDNS client. Every setting is optional; these are the defaults.
+# After a change: sudo systemctl restart enclavedns
+
+# EnclaveDNS (DoH at <upstream>/dns-query, ENS at <upstream>/api/ens/<name>)
+#upstream = "https://59f1273d.app.enclave.host"
+
+# Asked only while EnclaveDNS cannot be reached. An answer from EnclaveDNS,
+# SERVFAIL included (a DNSSEC failure), is never retried here. [] = none.
+#fallback = ["https://dns.quad9.net/dns-query"]
+
+# Plain DNS servers that find the upstreams' own addresses
+#bootstrap = ["9.9.9.9:53", "149.112.112.112:53", "1.1.1.1:53"]
+
+#dns_listen = ["127.0.0.1:53", "[::1]:53"]
+
+# .eth sites are served here, over HTTPS from a CA that only covers .eth/.ens
+#gateway = "127.0.0.3"
+#https = true
+#redirect_https = true
+
+# Names only the local network knows. `enclavedns enable` adds the network's
+# search domains (e.g. lan) in a managed block at the end of this file.
+#[[forward]]
+#zone = "lan"
+#servers = ["192.168.1.1:53"]
+
+# Local software for .eth sites (`enclavedns enable` fills ipfs from ~/.ipfs/config)
+#[backends]
+#ipfs = "http://127.0.0.1:8080"
+#ipfs_api = "http://127.0.0.1:5001"
+#bee = "http://127.0.0.1:1633"
+#arweave = "http://127.0.0.1:3000"
+#tor = ["127.0.0.1:9050", "127.0.0.1:9150"]

@@ -1,0 +1,19 @@
+[package]
+name = "enclavedns-android"
+description = "EnclaveDNS client for Android: the core engine behind a DNS-only VPN"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+enclavedns-core = { path = "../../crates/core" }
+tokio.workspace = true
+serde_json.workspace = true
+ipstack = "1"
+tun = { version = "0.8", features = ["async"] }
+jni = "0.21"

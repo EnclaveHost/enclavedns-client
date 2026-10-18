@@ -1,0 +1,118 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      code: ${{ steps.v.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          cargo_v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "$v" = "$cargo_v" || { echo "tag $v does not match Cargo.toml $cargo_v"; exit 1; }
+          IFS=. read -r a b c <<< "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "code=$((a * 1000000 + b * 1000 + c))" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p enclavedns-core
+      - run: cargo build --release --locked -p enclavedns
+      - run: |
+          d=enclavedns-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}
+          mkdir -p $d && cp target/release/enclavedns packaging/linux/* README.md LICENSE $d/
+          tar -czf $d.tar.gz $d
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: enclavedns-*.tar.gz
+
+  windows:
+    needs: version
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p enclavedns-core
+      - run: cargo build --release --locked -p enclavedns
+      - shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ needs.version.outputs.version }} packaging\windows\enclavedns.iss
+          $d = "enclavedns-${{ needs.version.outputs.version }}-windows-x86_64"
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item target\release\enclavedns.exe, packaging\windows\config.toml, README.md, LICENSE $d
+          Compress-Archive $d "dist\$d.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  android:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - run: cargo install cargo-ndk --locked
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.1.13356709" > /dev/null
+      - name: signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - run: ./gradlew --no-daemon assembleRelease
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.1.13356709
+          ENCLAVEDNS_VERSION: ${{ needs.version.outputs.version }}
+          ENCLAVEDNS_VERSION_CODE: ${{ needs.version.outputs.code }}
+          ENCLAVEDNS_KEYSTORE: ${{ runner.temp }}/release.jks
+          ENCLAVEDNS_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ENCLAVEDNS_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      - run: |
+          cp android/app/build/outputs/apk/release/app-release.apk EnclaveDNS-${{ needs.version.outputs.version }}.apk
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs EnclaveDNS-*.apk | head -3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: EnclaveDNS-*.apk
+
+  publish:
+    needs: [version, linux, windows, android]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - run: cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" \
+            --title "EnclaveDNS client ${{ needs.version.outputs.version }}" \
+            --notes "Linux (x86_64, aarch64; Arch: the \`enclavedns\` AUR package), Windows (installer or zip), Android (APK). See the README for setup. Verify downloads against SHA256SUMS."

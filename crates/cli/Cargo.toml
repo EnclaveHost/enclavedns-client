@@ -1,0 +1,20 @@
+[package]
+name = "enclavedns"
+description = "EnclaveDNS client: this machine's DNS through EnclaveDNS, and .eth sites in the browser"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "enclavedns"
+path = "src/main.rs"
+
+[dependencies]
+enclavedns-core = { path = "../core" }
+tokio.workspace = true
+serde_json.workspace = true
+hickory-proto = { version = "0.24", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

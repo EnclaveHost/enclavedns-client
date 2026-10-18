@@ -1,0 +1,95 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p enclavedns
+      - name: enable and disable on a real system (systemd-resolved, symlinked resolv.conf)
+        run: |
+          set -x
+          E=./target/release/enclavedns
+          ls -la /etc/resolv.conf
+          sudo $E --state /tmp/encstate run > /tmp/daemon.log 2>&1 &
+          for i in $(seq 1 30); do $E query enclave.host && break; sleep 1; done
+          sudo $E --state /tmp/encstate enable
+          getent hosts enclave.host
+          getent hosts playhh.eth | grep 127.0.0.3
+          $E status
+          # HTTPS for .eth, verified against the system trust store; no IPFS here, so the "not detected" page
+          code=$(curl -s -o /tmp/page.html -w '%{http_code}' https://vitalik.eth/)
+          test "$code" = 503 && grep -q "No IPFS node" /tmp/page.html
+          sudo $E --state /tmp/encstate disable
+          test -L /etc/resolv.conf
+          getent hosts enclave.host
+      - if: failure()
+        run: cat /tmp/daemon.log || true
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p enclavedns-core
+      - run: cargo build --release --locked -p enclavedns
+      - name: service, enable and disable on a real Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $e = "$PWD\target\release\enclavedns.exe"
+          & $e service install; if ($LASTEXITCODE) { throw 'service install' }
+          & $e service start;   if ($LASTEXITCODE) { throw 'service start' }
+          for ($i = 0; $i -lt 30; $i++) { & $e query enclave.host; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 1 }
+          & $e enable; if ($LASTEXITCODE) { throw 'enable' }
+          Get-DnsClientNrptRule | Format-Table Namespace, NameServers, Comment
+          Resolve-DnsName enclave.host -Type A -DnsOnly
+          $eth = Resolve-DnsName playhh.eth -Type A -DnsOnly
+          if (-not ($eth.IPAddress -contains '127.0.0.3')) { throw "playhh.eth did not resolve to the gateway" }
+          & $e status
+          # HTTPS for .eth, verified against the Windows Root store; no IPFS here, so the "not detected" page
+          $r = Invoke-WebRequest https://vitalik.eth/ -SkipHttpErrorCheck
+          if ($r.StatusCode -ne 503 -or $r.Content -notmatch 'No IPFS node') { throw "unexpected .eth page: $($r.StatusCode)" }
+          & $e disable; if ($LASTEXITCODE) { throw 'disable' }
+          & $e service uninstall; if ($LASTEXITCODE) { throw 'service uninstall' }
+          if (Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'EnclaveDNS*' }) { throw 'NRPT rules left behind' }
+      - name: installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.0.0-ci packaging\windows\enclavedns.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*.exe
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - run: cargo install cargo-ndk --locked
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.1.13356709" > /dev/null
+      - run: ./gradlew --no-daemon assembleDebug
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.1.13356709
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
