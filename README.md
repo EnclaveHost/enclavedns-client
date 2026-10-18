@@ -9,10 +9,11 @@ from the DNS root down before handing it out, keeps no query logs, and resolves
 ENS (`.eth`) names natively. This client makes a device use it:
 
 - **All DNS goes to EnclaveDNS** over DNS-over-HTTPS, through a local cache.
-  A fallback resolver (Quad9, also DoH) is used only while EnclaveDNS cannot
-  be reached at all. An answer from EnclaveDNS is final, SERVFAIL included,
-  which is how a DNSSEC failure looks, so a forged answer is never "rescued"
-  by the fallback.
+  If EnclaveDNS cannot be reached, lookups go to the device's own DNS (the
+  servers its network provides) until it can. An answer from EnclaveDNS is
+  final, SERVFAIL included, which is how a DNSSEC failure looks, so a forged
+  answer is never "rescued" by the fallback. Set `strict = true` to use
+  EnclaveDNS only: lookups then fail while it cannot be reached.
 - **`.eth` sites open in the browser.** Most ENS names point at content (an
   IPFS or Swarm hash, an Arweave transaction, a Tor onion service), not an
   IP address. The client answers those names with a local gateway address and
@@ -37,7 +38,8 @@ ENS (`.eth`) names natively. This client makes a device use it:
 - **DNS never depends on a dead client.** A watchdog (a systemd timer on Linux,
   a SYSTEM scheduled task on Windows) checks every minute that the client
   answers. If it does not, it restarts it; if it still does not, it gives DNS
-  back to the network's own servers until the client answers again.
+  back to the network's own servers until the client answers again (with
+  `strict = true` it only restarts it).
 
 ## Install
 
@@ -113,7 +115,9 @@ all other traffic takes the normal network.
 
 ```toml
 upstream = "https://59f1273d.app.enclave.host"   # EnclaveDNS
-fallback = ["https://dns.quad9.net/dns-query"]   # [] = no fallback at all
+strict = false                                   # true: EnclaveDNS only, lookups fail when it is unreachable
+system_dns = []                                  # the fallback: this device's own DNS, found by itself when empty
+fallback = []                                    # extra DoH resolvers after it, e.g. "https://dns.quad9.net/dns-query"
 bootstrap = ["9.9.9.9:53", "149.112.112.112:53", "1.1.1.1:53"]  # finds the upstreams' own addresses
 dns_listen = ["127.0.0.1:53", "[::1]:53"]
 gateway = "127.0.0.3"                            # where .eth sites are served
@@ -142,8 +146,9 @@ managed block at the end of the file.
   resolver). It runs in an attested enclave and keeps counters, not query
   logs; that is the point of using it. ENS answers come from several Ethereum
   providers at once and are accepted only when they agree.
-- **What the fallback sees:** names looked up while EnclaveDNS is unreachable.
-  Set `fallback = []` to fail closed instead.
+- **What the fallback sees:** your network's DNS (usually your router or ISP)
+  sees names looked up while EnclaveDNS is unreachable, in plain DNS. Set
+  `strict = true` to fail closed instead.
 - **The bootstrap servers** see the upstreams' own host names, and nothing
   else.
 - **The local CA** can only vouch for `.eth` and `.ens` names (an X.509 name

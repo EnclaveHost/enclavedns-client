@@ -167,6 +167,36 @@ fn network() -> Network {
     n
 }
 
+/// Every non-loopback server the network gave this machine (public ones
+/// too: unlike forward zones, the fallback may use any of them).
+fn network_servers_all() -> Vec<SocketAddr> {
+    let mut v = enclavedns_core::sysdns::discover();
+    for f in [
+        format!("{SYS}/resolv.conf.saved"),
+        "/etc/resolv.conf.before-enclavedns".to_string(),
+        RESOLV.to_string(),
+    ] {
+        if !v.is_empty() {
+            break;
+        }
+        if let Ok(t) = fs::read_to_string(&f) {
+            for line in t.lines() {
+                let mut w = line.split_whitespace();
+                if w.next() == Some("nameserver") {
+                    if let Some(ip) = w
+                        .next()
+                        .and_then(|i| i.parse::<std::net::IpAddr>().ok())
+                        .filter(|i| !i.is_loopback())
+                    {
+                        v.push(SocketAddr::new(ip, 53));
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
 /// kubo's gateway and API from the invoking user's ~/.ipfs/config.
 fn kubo() -> Option<(String, String)> {
     let user = std::env::var("SUDO_USER").ok()?;
@@ -336,6 +366,10 @@ pub fn watchdog(ctx: &Ctx) -> Result<(), String> {
             }
         }
         if !back {
+            if cfg.strict {
+                println!("still no answer, and the config is strict: DNS stays with the client (lookups fail until it answers)");
+                return Ok(());
+            }
             if !suspended {
                 restore_saved_resolv()?;
                 fs::write(SUSPENDED, "the client did not answer; the network's resolv.conf is back (DNS fails open)\n").map_err(|e| e.to_string())?;
@@ -380,6 +414,18 @@ sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
 
     println!("== 2/4 local names and local software");
     let net = network();
+    // the network's servers, for the fallback on machines with neither
+    // NetworkManager nor systemd-resolved to ask later (the service reads it)
+    let all = network_servers_all();
+    if !all.is_empty() {
+        let _ = fs::create_dir_all("/etc/enclavedns");
+        let _ = fs::write(
+            "/etc/enclavedns/network-dns",
+            all.iter()
+                .map(|a| format!("{}\n", a.ip()))
+                .collect::<String>(),
+        );
+    }
     let said = write_managed_block(&ctx.config_path, &net, kubo())?;
     println!("   {said}");
     let _ = sh("systemctl", &["try-restart", "enclavedns.service"]);

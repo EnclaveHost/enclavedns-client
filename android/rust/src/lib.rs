@@ -194,6 +194,26 @@ pub extern "system" fn Java_host_enclave_dns_Native_status<'l>(
     out(&mut env, Some(s))
 }
 
+/// `Native.setSystemDns("ip,ip,...")`: the underlying network's DNS servers,
+/// the fallback while EnclaveDNS cannot be reached (unless strict).
+#[no_mangle]
+pub extern "system" fn Java_host_enclave_dns_Native_setSystemDns<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    servers: JString<'l>,
+) {
+    let list = jstr(&mut env, &servers);
+    let v: Vec<SocketAddr> = list
+        .split(',')
+        .filter_map(|s| s.trim().split('%').next()?.parse::<IpAddr>().ok())
+        .filter(|ip| !ip.is_loopback())
+        .map(|ip| SocketAddr::new(ip, 53))
+        .collect();
+    if let Some(r) = RUNNING.lock().unwrap().as_ref() {
+        r.engine.up.set_system_dns(v);
+    }
+}
+
 /// `Native.check(configToml)`: null when the settings are valid, else why not.
 #[no_mangle]
 pub extern "system" fn Java_host_enclave_dns_Native_check<'l>(

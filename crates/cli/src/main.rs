@@ -181,13 +181,35 @@ fn status(ctx: &Ctx) {
                 if v["upstream_reachable"].as_bool() == Some(true) {
                     "reachable"
                 } else {
-                    "UNREACHABLE: using the fallback"
+                    if v["strict"].as_bool() == Some(true) {
+                        "UNREACHABLE: lookups fail (strict)"
+                    } else {
+                        "UNREACHABLE: using this machine's own DNS"
+                    }
                 }
             );
+            if v["strict"].as_bool() == Some(true) {
+                println!(
+                    "fallback    none (strict): lookups fail while EnclaveDNS cannot be reached"
+                );
+            } else {
+                let sys: Vec<&str> = v["system_dns"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                println!(
+                    "fallback    this machine's own DNS while EnclaveDNS cannot be reached ({})",
+                    if sys.is_empty() {
+                        "none found yet".to_string()
+                    } else {
+                        sys.join(", ")
+                    }
+                );
+            }
             let q = &v["queries"];
             println!(
-                "answers     {} from EnclaveDNS, {} from cache, {} from the fallback, {} local-network, {} failed",
-                q["enclavedns"], q["cached"], q["fallback"], q["forwarded"], q["failed"]
+                "answers     {} from EnclaveDNS, {} from cache, {} from this machine's DNS, {} from DoH fallbacks, {} local-network, {} failed",
+                q["enclavedns"], q["cached"], q["system"], q["fallback"], q["forwarded"], q["failed"]
             );
             if let Some(p) = v["gateway_problems"].as_array().filter(|p| !p.is_empty()) {
                 for x in p {

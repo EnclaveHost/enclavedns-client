@@ -428,6 +428,10 @@ pub fn watchdog(ctx: &Ctx) -> Result<(), String> {
             }
         }
         if !back {
+            if cfg.strict {
+                watchdog_log("still no answer, and the config is strict: DNS stays with the client (lookups fail until it answers)");
+                return Ok(());
+            }
             if !suspended {
                 remove_nrpt()?;
                 std::fs::write(

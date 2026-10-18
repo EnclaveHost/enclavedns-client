@@ -11,6 +11,9 @@ object Native {
 
     @JvmStatic external fun stop()
 
+    /** The underlying network's DNS servers ("ip,ip"), the fallback unless strict. */
+    @JvmStatic external fun setSystemDns(servers: String)
+
     /** JSON: answers, EnclaveDNS reachability, which local software it sees. */
     @JvmStatic external fun status(): String
 

@@ -15,6 +15,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p enclavedns
+      - name: EnclaveDNS unreachable -> this machine's own DNS answers; strict -> lookups fail
+        run: |
+          set -x
+          E=./target/release/enclavedns
+          printf 'upstream = "https://enclavedns-down.invalid"\ndns_listen = ["127.0.0.7:5356"]\ngateway = "127.0.0.8"\nhttp_port = 8481\nhttps_port = 8444\nstatus_port = 5381\n' > /tmp/down.toml
+          $E --config /tmp/down.toml --state /tmp/s2 run > /tmp/down.log 2>&1 & P=$!
+          sleep 3
+          $E --config /tmp/down.toml query example.com | tee /tmp/q.txt; grep -q NoError /tmp/q.txt
+          $E --config /tmp/down.toml status | grep -q "1 from this machine's DNS"
+          kill $P; sleep 1
+          sed -i '1i strict = true' /tmp/down.toml
+          $E --config /tmp/down.toml --state /tmp/s2 run > /tmp/down2.log 2>&1 & P=$!
+          sleep 3
+          $E --config /tmp/down.toml query example.com | tee /tmp/q.txt; grep -q ServFail /tmp/q.txt
+          kill $P
       - name: enable and disable on a real system (systemd-resolved, symlinked resolv.conf)
         run: |
           set -x

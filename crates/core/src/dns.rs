@@ -1,9 +1,10 @@
 //! The stub resolver: every DNS question this machine asks.
 //!
-//! * Everything goes to EnclaveDNS over DoH, through a cache. The fallback
-//!   resolvers are asked only when EnclaveDNS cannot be reached at all: an
-//!   answer from it, SERVFAIL included (that is how a DNSSEC failure looks),
-//!   is final.
+//! * Everything goes to EnclaveDNS over DoH, through a cache. Only when
+//!   EnclaveDNS cannot be reached at all (and the config is not strict) does
+//!   a question go to this machine's own DNS, then any DoH fallbacks: an
+//!   answer from EnclaveDNS, SERVFAIL included (that is how a DNSSEC failure
+//!   looks), is final.
 //! * `.eth` and `.ens` exist only in EnclaveDNS, so they never go to the
 //!   fallback. An `A` question about such a name that holds no address
 //!   records (content, a `url`, only a wallet) is answered with the gateway
@@ -176,6 +177,7 @@ pub async fn answer(e: &Engine, wire: &[u8]) -> Option<Vec<u8>> {
         let mut c = e.counters.lock().unwrap();
         match &r {
             Ok((_, crate::upstream::Via::Primary)) => c.enclavedns += 1,
+            Ok((_, crate::upstream::Via::System)) => c.system += 1,
             Ok((_, crate::upstream::Via::Fallback)) => c.fallback += 1,
             Err(_) => c.failed += 1,
         }

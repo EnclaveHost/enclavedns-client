@@ -1,5 +1,5 @@
-//! Asking upstream: DoH to EnclaveDNS, and to the fallback resolvers only
-//! while EnclaveDNS cannot be reached.
+//! Asking upstream: DoH to EnclaveDNS; while it cannot be reached (and the
+//! config is not strict), this machine's own DNS, then any DoH fallbacks.
 //!
 //! The system resolver points at this client, so the DoH hosts' own
 //! addresses come from a small bootstrap resolver (plain DNS to fixed
@@ -216,6 +216,9 @@ pub struct Upstream {
     http: reqwest::Client,
     primary: String,
     fallback: Vec<String>,
+    strict: bool,
+    /// this machine's own DNS servers (refreshed by the platform)
+    system: Mutex<Vec<SocketAddr>>,
     /// while EnclaveDNS is unreachable, go straight to the fallback (ms since start)
     primary_down_until: AtomicU64,
     started: Instant,
@@ -226,6 +229,8 @@ pub struct Upstream {
 pub struct UpstreamStats {
     pub primary_answers: u64,
     pub primary_failures: u64,
+    pub system_answers: u64,
+    pub system_failures: u64,
     pub fallback_answers: u64,
     pub fallback_failures: u64,
     pub last_primary_error: Option<String>,
@@ -241,6 +246,8 @@ const PRIMARY_HOLD: Duration = Duration::from_secs(20);
 
 pub enum Via {
     Primary,
+    /// this machine's own DNS
+    System,
     Fallback,
 }
 
@@ -258,6 +265,8 @@ impl Upstream {
             http,
             primary: cfg.doh_url(),
             fallback: cfg.fallback.clone(),
+            strict: cfg.strict,
+            system: Mutex::new(cfg.system_dns.clone()),
             primary_down_until: AtomicU64::new(0),
             started: Instant::now(),
             stats: Mutex::default(),
@@ -297,11 +306,33 @@ impl Upstream {
         Ok(b.to_vec())
     }
 
-    /// Ask EnclaveDNS; on a transport failure (never on a DNS answer), the
-    /// fallbacks, unless `primary_only` (names only EnclaveDNS can answer).
+    /// The system's own DNS servers now (empty = none known).
+    pub fn system_dns(&self) -> Vec<SocketAddr> {
+        self.system.lock().unwrap().clone()
+    }
+
+    /// Replace the system's DNS servers (the platform found new ones). The
+    /// config's `system_dns`, when set, is kept as is.
+    pub fn set_system_dns(&self, servers: Vec<SocketAddr>) {
+        if !servers.is_empty() {
+            *self.system.lock().unwrap() = servers;
+        }
+    }
+
+    pub fn strict(&self) -> bool {
+        self.strict
+    }
+
+    fn can_fall_back(&self) -> bool {
+        !self.strict && (!self.fallback.is_empty() || !self.system.lock().unwrap().is_empty())
+    }
+
+    /// Ask EnclaveDNS; on a transport failure (never on a DNS answer), and
+    /// unless strict or `primary_only` (names only EnclaveDNS can answer),
+    /// this machine's own DNS, then the DoH fallbacks.
     pub async fn query(&self, q: &[u8], primary_only: bool) -> Result<(Vec<u8>, Via), String> {
         let mut err = String::new();
-        if primary_only || !self.primary_down() || self.fallback.is_empty() {
+        if primary_only || !self.primary_down() || !self.can_fall_back() {
             let t0 = Instant::now();
             match self.doh(&self.primary, q, PRIMARY_WAIT).await {
                 Ok(b) => {
@@ -330,8 +361,21 @@ impl Upstream {
                 }
             }
         }
-        if primary_only {
+        if primary_only || self.strict {
             return Err(err);
+        }
+        let system = self.system_dns();
+        for s in &system {
+            match plain(*s, q).await {
+                Ok(b) => {
+                    self.stats.lock().unwrap().system_answers += 1;
+                    return Ok((b, Via::System));
+                }
+                Err(e) => {
+                    self.stats.lock().unwrap().system_failures += 1;
+                    err = format!("{err}; system DNS {s}: {e}");
+                }
+            }
         }
         for f in &self.fallback {
             match self.doh(f, q, FALLBACK_WAIT).await {

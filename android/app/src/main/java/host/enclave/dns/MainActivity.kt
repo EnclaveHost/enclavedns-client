@@ -106,7 +106,7 @@ class MainActivity : Activity() {
         root.addView(heading("Settings"))
         val upstream = field("EnclaveDNS", settings.upstream)
         val fallback = CheckBox(this).apply {
-            text = "Use Quad9 while EnclaveDNS cannot be reached"
+            text = "Use this network's DNS while EnclaveDNS cannot be reached (off: EnclaveDNS only, lookups fail instead)"
             isChecked = settings.fallback
             root.addView(this)
         }

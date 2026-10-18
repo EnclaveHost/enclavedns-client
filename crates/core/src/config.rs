@@ -2,7 +2,9 @@
 //!
 //! ```toml
 //! upstream = "https://59f1273d.app.enclave.host"   # EnclaveDNS
-//! fallback = ["https://dns.quad9.net/dns-query"]   # [] = no fallback
+//! strict = false            # true: EnclaveDNS only, lookups fail when it cannot be reached
+//! system_dns = []           # this machine's own DNS; found by itself when empty
+//! fallback = []             # extra DoH resolvers after the system's DNS
 //! bootstrap = ["9.9.9.9:53", "1.1.1.1:53"]
 //! dns_listen = ["127.0.0.1:53", "[::1]:53"]
 //! gateway = "127.0.0.3"
@@ -26,9 +28,20 @@ use std::path::PathBuf;
 pub struct Config {
     /// EnclaveDNS: DoH at `<upstream>/dns-query`, ENS at `<upstream>/api/ens/<name>`
     pub upstream: String,
-    /// DoH resolvers used only while EnclaveDNS cannot be reached. A DNS
-    /// answer from EnclaveDNS, SERVFAIL included (a DNSSEC failure), is never
-    /// retried here.
+    /// EnclaveDNS only. false (the default): while EnclaveDNS cannot be
+    /// reached, lookups go to this machine's own DNS (the network's servers),
+    /// and if the client itself stops answering, the watchdog hands DNS back
+    /// to the system. true: lookups fail instead, and the watchdog only ever
+    /// restarts the client. Either way an answer from EnclaveDNS, SERVFAIL
+    /// included (a DNSSEC failure), is final, and `.eth` never falls back.
+    pub strict: bool,
+    /// This machine's own DNS servers, the fallback. Empty = found at run
+    /// time (Linux: systemd-resolved or NetworkManager; Windows: the
+    /// adapters; Android: the underlying network); `enclavedns enable` also
+    /// writes what it found here.
+    pub system_dns: Vec<SocketAddr>,
+    /// DoH resolvers tried after the system's DNS while EnclaveDNS cannot be
+    /// reached (e.g. "https://dns.quad9.net/dns-query"). Empty by default.
     pub fallback: Vec<String>,
     /// Plain DNS servers that find the upstreams' own addresses (the system
     /// resolver points at this client, so it cannot be asked).
@@ -107,7 +120,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             upstream: DEFAULT_UPSTREAM.into(),
-            fallback: vec!["https://dns.quad9.net/dns-query".into()],
+            strict: false,
+            system_dns: Vec::new(),
+            fallback: Vec::new(),
             bootstrap: vec![
                 "9.9.9.9:53".parse().unwrap(),
                 "149.112.112.112:53".parse().unwrap(),
@@ -188,9 +203,10 @@ mod tests {
     fn defaults_and_partial_files() {
         let c = Config::from_toml("").unwrap();
         assert_eq!(c.doh_url(), "https://59f1273d.app.enclave.host/dns-query");
-        let c = Config::from_toml("fallback = []\n[backends]\nipfs = \"http://127.0.0.1:8081\"\n")
+        assert!(!Config::default().strict && Config::default().fallback.is_empty());
+        let c = Config::from_toml("strict = true\nsystem_dns = [\"192.168.8.1:53\"]\n[backends]\nipfs = \"http://127.0.0.1:8081\"\n")
             .unwrap();
-        assert!(c.fallback.is_empty());
+        assert!(c.strict && c.system_dns.len() == 1);
         assert_eq!(c.backends.ipfs, "http://127.0.0.1:8081");
         assert_eq!(c.backends.bee, "http://127.0.0.1:1633");
         assert!(Config::from_toml("upstream = \"http://plain\"").is_err());

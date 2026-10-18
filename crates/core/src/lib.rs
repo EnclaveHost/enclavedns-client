@@ -16,6 +16,7 @@ pub mod dns;
 pub mod ens;
 pub mod gateway;
 pub mod pages;
+pub mod sysdns;
 pub mod tls;
 pub mod upstream;
 
@@ -31,6 +32,8 @@ pub struct Counters {
     pub fallback: u64,
     pub failed: u64,
     pub forwarded: u64,
+    /// answered by this machine's own DNS while EnclaveDNS could not be reached
+    pub system: u64,
 }
 
 pub struct Engine {
@@ -106,6 +109,8 @@ impl Engine {
             "upstream": self.cfg.upstream,
             "upstream_reachable": !self.up.primary_down(),
             "upstream_stats": up,
+            "strict": self.up.strict(),
+            "system_dns": self.up.system_dns().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
             "fallback": self.cfg.fallback,
             "forward": self.cfg.forward,
             "queries": *self.counters.lock().unwrap(),
@@ -150,6 +155,19 @@ impl Engine {
         // The .eth gateway is a convenience; DNS must never go down with it.
         // A port that cannot be bound (on Windows, HTTP.sys often holds :80 on
         // every address) is reported in `status` and the rest carries on.
+        // this machine's own DNS, the fallback: found again every minute
+        // (networks change), unless the config names it or is strict
+        if self.cfg.system_dns.is_empty() && !self.cfg.strict {
+            let me = self.clone();
+            tasks.spawn(async move {
+                loop {
+                    if let Ok(found) = tokio::task::spawn_blocking(sysdns::discover).await {
+                        me.up.set_system_dns(found);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
+        }
         let gw = self.cfg.gateway;
         match tokio::net::TcpListener::bind((gw, self.cfg.http_port)).await {
             Ok(l) => {

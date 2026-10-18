@@ -33,7 +33,8 @@ class Settings(context: Context) {
         val torList = tor.split(',', ' ').filter { it.isNotBlank() }.joinToString(", ") { q(it) }
         return buildString {
             append("upstream = ${q(upstream)}\n")
-            if (!fallback) append("fallback = []\n")
+            // fallback = this network's own DNS while EnclaveDNS cannot be reached; off = EnclaveDNS only
+            if (!fallback) append("strict = true\n")
             append("\n[backends]\n")
             append("ipfs = ${q(ipfs)}\n")
             append("ipfs_api = ${q(ipfsApi)}\n")

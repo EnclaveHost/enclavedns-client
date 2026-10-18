@@ -5,8 +5,18 @@
 # EnclaveDNS (DoH at <upstream>/dns-query, ENS at <upstream>/api/ens/<name>)
 #upstream = "https://59f1273d.app.enclave.host"
 
-# Asked only while EnclaveDNS cannot be reached. An answer from EnclaveDNS,
-# SERVFAIL included (a DNSSEC failure), is never retried here. [] = none.
+# When EnclaveDNS cannot be reached, lookups go to this machine's own DNS (the
+# servers the network gave it), and if the client itself stops answering, the
+# watchdog hands DNS back to the system until it answers again.
+# strict = true: EnclaveDNS only. Lookups FAIL while it cannot be reached, and
+# the watchdog only ever restarts the client. Either way an answer from
+# EnclaveDNS (a DNSSEC failure included) is final, and .eth never falls back.
+#strict = false
+
+# This machine's own DNS servers; found by themselves when not set
+#system_dns = ["192.168.1.1:53"]
+
+# Extra DoH resolvers tried after this machine's DNS (none by default)
 #fallback = ["https://dns.quad9.net/dns-query"]
 
 # Plain DNS servers that find the upstreams' own addresses
