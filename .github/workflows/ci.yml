@@ -170,6 +170,7 @@ jobs:
           if (Test-Path "$env:ProgramData\EnclaveDNS\state") { throw 'the CA key folder is left behind' }
           Resolve-DnsName github.com -Type A | Out-Null
           Write-Output 'uninstalled: no service, no NRPT rules, no CA, no task, no key; DNS works'
+          exit 0   # the expected-failing schtasks /Query above left LASTEXITCODE at 1
       - if: failure()
         shell: pwsh
         run: |
