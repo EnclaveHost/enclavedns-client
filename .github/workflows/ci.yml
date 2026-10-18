@@ -62,6 +62,12 @@ jobs:
           & $e disable; if ($LASTEXITCODE) { throw 'disable' }
           & $e service uninstall; if ($LASTEXITCODE) { throw 'service uninstall' }
           if (Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'EnclaveDNS*' }) { throw 'NRPT rules left behind' }
+      - if: failure()
+        shell: pwsh
+        run: |
+          sc.exe query EnclaveDNS
+          Get-Content "$env:ProgramData\EnclaveDNS\enclavedns.log" -ErrorAction SilentlyContinue
+          netstat -ano | Select-String ':53 |:80 |:443 '
       - name: installer
         shell: pwsh
         run: |
@@ -84,11 +90,11 @@ jobs:
         with:
           targets: aarch64-linux-android,x86_64-linux-android
       - run: cargo install cargo-ndk --locked
-      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.1.13356709" > /dev/null
+      - run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.1.13356709" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.1.13356709" >> "$GITHUB_ENV"
       - run: ./gradlew --no-daemon assembleDebug
         working-directory: android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.1.13356709
       - uses: actions/upload-artifact@v4
         with:
           name: android-debug-apk

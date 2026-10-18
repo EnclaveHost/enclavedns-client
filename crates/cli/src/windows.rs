@@ -96,17 +96,24 @@ fn service_main(_args: Vec<OsString>) {
             process_id: None,
         });
     };
+    log_to_file();
     let ctx = Ctx {
         config_path: crate::paths::config_file(),
         state_dir: crate::paths::state_dir(),
     };
     let cfg = match enclavedns_core::Config::load(&ctx.config_path) {
         Ok(c) => c,
-        Err(_) => return set(ServiceState::Stopped, 1),
+        Err(e) => {
+            eprintln!("enclavedns: {e}");
+            return set(ServiceState::Stopped, 1);
+        }
     };
     let engine = match enclavedns_core::Engine::new(cfg, &ctx.state_dir) {
         Ok(e) => e,
-        Err(_) => return set(ServiceState::Stopped, 2),
+        Err(e) => {
+            eprintln!("enclavedns: {e}");
+            return set(ServiceState::Stopped, 2);
+        }
     };
     set(ServiceState::Running, 0);
     let rt = crate::runtime();
@@ -114,13 +121,44 @@ fn service_main(_args: Vec<OsString>) {
         let mut serve = tokio::spawn(engine.run());
         let stop = tokio::task::spawn_blocking(move || stop_rx.recv());
         tokio::select! {
-            r = &mut serve => !matches!(r, Ok(Ok(()))),
+            r = &mut serve => {
+                match &r {
+                    Ok(Err(e)) => eprintln!("enclavedns: {e}"),
+                    Err(e) => eprintln!("enclavedns: {e}"),
+                    Ok(Ok(())) => {}
+                }
+                !matches!(r, Ok(Ok(())))
+            }
             _ = stop => false,
         }
     });
     rt.shutdown_timeout(Duration::from_secs(2));
     // a failure exits non-zero so the service manager restarts it
     set(ServiceState::Stopped, if failed { 3 } else { 0 });
+}
+
+/// A service has no console: its stderr goes to %ProgramData%\EnclaveDNS\enclavedns.log
+/// (kept under 1 MB).
+fn log_to_file() {
+    use std::os::windows::io::AsRawHandle;
+    extern "system" {
+        fn SetStdHandle(n: u32, h: *mut std::ffi::c_void) -> i32;
+    }
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    let p = crate::paths::program_data().join("enclavedns.log");
+    if std::fs::metadata(&p).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(&p, p.with_extension("log.old"));
+    }
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
+        // SAFETY: the handle stays valid for the life of the process (the file is leaked on purpose)
+        unsafe { SetStdHandle(STD_ERROR_HANDLE, f.as_raw_handle()) };
+        std::mem::forget(f);
+        eprintln!("--- enclavedns {} service start", env!("CARGO_PKG_VERSION"));
+    }
 }
 
 pub fn service(ctx: &Ctx, rest: &[String]) {
