@@ -103,15 +103,17 @@ jobs:
           $o = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
           $st = "$env:ProgramData\EnclaveDNS\state"
           function Leaf($n) {
-            & $o req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$n.key" -subj "/CN=$n" -addext "subjectAltName=DNS:$n" -out "$n.csr" 2>$null
+            & $o req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$n.key" -subj "/CN=$n" -addext "subjectAltName=DNS:$n" -out "$n.csr" 2>$null | Out-Null
             "subjectAltName=DNS:$n`nextendedKeyUsage=serverAuth`n" | Set-Content -Encoding ascii "$n.ext"
-            & $o x509 -req -in "$n.csr" -CA "$st\ca.crt" -CAkey "$st\ca.key" -CAcreateserial -days 30 -extfile "$n.ext" -out "$n.crt" 2>$null
+            & $o x509 -req -in "$n.csr" -CA "$st\ca.crt" -CAkey "$st\ca.key" -CAcreateserial -days 30 -extfile "$n.ext" -out "$n.crt" 2>$null | Out-Null
+            if (-not (Test-Path "$n.crt")) { throw "openssl did not make $n.crt" }
             $c = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path "$n.crt").Path)
             $ch = [Security.Cryptography.X509Certificates.X509Chain]::new()
             $ch.ChainPolicy.RevocationMode = 'NoCheck'
             $ok = $ch.Build($c)
-            Write-Output "$n -> chain valid: $ok ($(($ch.ChainStatus | ForEach-Object Status) -join ', '))"
-            return $ok
+            # Write-Host: anything written to the output stream would become part of the return value
+            Write-Host "$n -> chain valid: $ok ($(($ch.ChainStatus | ForEach-Object Status) -join ', '))"
+            return [bool]$ok
           }
           # the positive control: the same CA, a .eth name, the same chain machinery
           if (-not (Leaf 'control.eth')) { throw 'a .eth certificate from the CA did not validate: the test proves nothing' }

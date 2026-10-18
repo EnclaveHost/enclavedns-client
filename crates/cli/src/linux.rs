@@ -405,7 +405,7 @@ sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
         .copied()
         .ok_or("dns_listen is empty")?;
     fs::create_dir_all(SYS).map_err(|e| e.to_string())?;
-    let _ = sh("chmod", &["0700", SYS]);
+    let _ = sh("chmod", &["0755", SYS]); // nothing secret; `status` (unprivileged) reads the watchdog marker
 
     println!("== 1/4 the client answers on {dns}");
     if !wait_answering(dns) {
