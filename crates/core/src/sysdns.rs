@@ -8,6 +8,13 @@ fn keep(ip: IpAddr, out: &mut Vec<SocketAddr>) {
     if ip.is_loopback() || ip.is_unspecified() {
         return;
     }
+    // fec0::/10 (deprecated site-local): Windows lists fec0:0:0:ffff::1-3 as
+    // placeholder DNS on adapters that have none; nothing answers there
+    if let IpAddr::V6(v6) = ip {
+        if v6.segments()[0] & 0xffc0 == 0xfec0 {
+            return;
+        }
+    }
     let a = SocketAddr::new(ip, 53);
     if !out.contains(&a) {
         out.push(a);
@@ -101,7 +108,7 @@ mod tests {
     #[test]
     fn parses_and_skips_loopback() {
         let mut v = Vec::new();
-        nameservers("# x\nnameserver 127.0.0.53\nnameserver 192.168.8.1\nnameserver fe80::1%eth0\nnameserver ::1\n", &mut v);
+        nameservers("# x\nnameserver 127.0.0.53\nnameserver 192.168.8.1\nnameserver fe80::1%eth0\nnameserver ::1\nnameserver fec0:0:0:ffff::1\n", &mut v);
         assert_eq!(
             v,
             vec![

@@ -372,18 +372,29 @@ impl Upstream {
         if primary_only || self.strict {
             return Err(err);
         }
+        // all of the system's servers at once, the first answer wins: one dead
+        // server (or a stale one from another network) must not stall lookups
         let system = self.system_dns();
-        for s in &system {
-            match plain(*s, q).await {
-                Ok(b) => {
-                    self.stats.lock().unwrap().system_answers += 1;
-                    return Ok((b, Via::System));
-                }
-                Err(e) => {
-                    self.stats.lock().unwrap().system_failures += 1;
-                    err = format!("{err}; system DNS {s}: {e}");
+        if !system.is_empty() {
+            let mut set = tokio::task::JoinSet::new();
+            for s in system {
+                let q = q.to_vec();
+                set.spawn(async move { (s, plain(s, &q).await) });
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            loop {
+                match tokio::time::timeout_at(deadline, set.join_next()).await {
+                    Ok(Some(Ok((_, Ok(b))))) => {
+                        self.stats.lock().unwrap().system_answers += 1;
+                        set.abort_all();
+                        return Ok((b, Via::System));
+                    }
+                    Ok(Some(Ok((s, Err(e))))) => err = format!("{err}; system DNS {s}: {e}"),
+                    Ok(Some(Err(_))) => {}
+                    Ok(None) | Err(_) => break,
                 }
             }
+            self.stats.lock().unwrap().system_failures += 1;
         }
         for f in &self.fallback {
             match self.doh(f, q, FALLBACK_WAIT).await {

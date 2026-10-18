@@ -26,6 +26,17 @@ jobs:
           $E --config /tmp/down.toml query example.com | tee /tmp/q.txt; grep -q NoError /tmp/q.txt
           $E --config /tmp/down.toml status | grep -q "1 from this machine's DNS"
           kill $P; sleep 1
+          # a dead system DNS server listed first must not stall the fallback (parallel, first answer wins)
+          REAL=$(awk '/^nameserver/{print $2; exit}' /run/systemd/resolve/resolv.conf)
+          printf 'system_dns = ["10.255.255.1:53", "[fec0:0:0:ffff::1]:53", "%s:53"]\n' "$REAL" > /tmp/dead.toml
+          cat /tmp/down.toml >> /tmp/dead.toml
+          sed -i 's/127.0.0.7:5356/127.0.0.9:5357/; s/127.0.0.8/127.0.0.10/' /tmp/dead.toml
+          $E --config /tmp/dead.toml --state /tmp/s3 run > /tmp/dead.log 2>&1 & P2=$!
+          sleep 3
+          $E --config /tmp/dead.toml query example.net >/dev/null || true   # pays EnclaveDNS's own failure once
+          t0=$(date +%s%N); $E --config /tmp/dead.toml query example.org | tee /tmp/q.txt; ms=$(( ($(date +%s%N)-t0)/1000000 ))
+          grep -q NoError /tmp/q.txt; echo "fallback with a dead server first: ${ms} ms"; test "$ms" -lt 1500
+          kill $P2
           sed -i '1i strict = true' /tmp/down.toml
           $E --config /tmp/down.toml --state /tmp/s2 run > /tmp/down2.log 2>&1 & P=$!
           sleep 3
