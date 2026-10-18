@@ -29,6 +29,19 @@ jobs:
           # HTTPS for .eth, verified against the system trust store; no IPFS here, so the "not detected" page
           code=$(curl -s -o /tmp/page.html -w '%{http_code}' https://vitalik.eth/)
           test "$code" = 503 && grep -q "No IPFS node" /tmp/page.html
+          # watchdog: the client dies and cannot come back (no systemd unit here) -> DNS fails open
+          sudo pkill -9 -f 'enclavedns --state /tmp/encstate run' || true
+          sleep 1
+          sudo $E --state /tmp/encstate watchdog
+          test -L /etc/resolv.conf
+          getent hosts github.com
+          $E status | grep -q "NETWORK's DNS"
+          # the client is back -> the watchdog points DNS at it again
+          sudo $E --state /tmp/encstate run > /tmp/daemon2.log 2>&1 &
+          for i in $(seq 1 30); do $E query use-application-dns.net && break; sleep 1; done
+          sudo $E --state /tmp/encstate watchdog
+          grep -q 'enclavedns enable' /etc/resolv.conf
+          getent hosts enclave.host
           sudo $E --state /tmp/encstate disable
           test -L /etc/resolv.conf
           getent hosts enclave.host
@@ -42,32 +55,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked -p enclavedns-core
       - run: cargo build --release --locked -p enclavedns
-      - name: service, enable and disable on a real Windows
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $e = "$PWD\target\release\enclavedns.exe"
-          & $e service install; if ($LASTEXITCODE) { throw 'service install' }
-          & $e service start;   if ($LASTEXITCODE) { throw 'service start' }
-          for ($i = 0; $i -lt 30; $i++) { & $e query enclave.host; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 1 }
-          & $e enable; if ($LASTEXITCODE) { throw 'enable' }
-          Get-DnsClientNrptRule | Format-Table Namespace, NameServers, Comment
-          Resolve-DnsName enclave.host -Type A -DnsOnly
-          $eth = Resolve-DnsName playhh.eth -Type A -DnsOnly
-          if (-not ($eth.IPAddress -contains '127.0.0.3')) { throw "playhh.eth did not resolve to the gateway" }
-          & $e status
-          # HTTPS for .eth, verified against the Windows Root store; no IPFS here, so the "not detected" page
-          $r = Invoke-WebRequest https://vitalik.eth/ -SkipHttpErrorCheck
-          if ($r.StatusCode -ne 503 -or $r.Content -notmatch 'No IPFS node') { throw "unexpected .eth page: $($r.StatusCode)" }
-          & $e disable; if ($LASTEXITCODE) { throw 'disable' }
-          & $e service uninstall; if ($LASTEXITCODE) { throw 'service uninstall' }
-          if (Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'EnclaveDNS*' }) { throw 'NRPT rules left behind' }
-      - if: failure()
-        shell: pwsh
-        run: |
-          sc.exe query EnclaveDNS
-          Get-Content "$env:ProgramData\EnclaveDNS\enclavedns.log" -ErrorAction SilentlyContinue
-          netstat -ano | Select-String ':53 |:80 |:443 '
       - name: installer
         shell: pwsh
         run: |
@@ -77,6 +64,103 @@ jobs:
         with:
           name: windows-installer
           path: dist/*.exe
+      - name: install with the installer, as the Enclave host installer does
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist\EnclaveDNS-Setup-*.exe).FullName
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=enable,path' -Wait -PassThru
+          if ($p.ExitCode) { throw "installer exit $($p.ExitCode)" }
+          $e = "$env:ProgramFiles\EnclaveDNS\enclavedns.exe"
+          if ((Get-Service EnclaveDNS).Status -ne 'Running') { throw 'service not running' }
+          if (-not (Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'EnclaveDNS' })) { throw 'no NRPT rule' }
+          schtasks /Query /TN '\EnclaveDNS\Watchdog'; if ($LASTEXITCODE) { throw 'no watchdog task' }
+          Resolve-DnsName enclave.host -Type A -DnsOnly | Out-Null
+          $eth = Resolve-DnsName playhh.eth -Type A -DnsOnly
+          if (-not ($eth.IPAddress -contains '127.0.0.3')) { throw "playhh.eth did not resolve to the gateway" }
+          $r = Invoke-WebRequest https://vitalik.eth/ -SkipHttpErrorCheck
+          if ($r.StatusCode -ne 503 -or $r.Content -notmatch 'No IPFS node') { throw "unexpected .eth page: $($r.StatusCode)" }
+          & $e status
+      - name: (a) the CA cannot vouch for a non-.eth name (Windows CryptoAPI, Root store)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $o = "$env:ProgramFiles\Git\usr\bin\openssl.exe"
+          $st = "$env:ProgramData\EnclaveDNS\state"
+          function Leaf($n) {
+            & $o req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$n.key" -subj "/CN=$n" -addext "subjectAltName=DNS:$n" -out "$n.csr" 2>$null
+            "subjectAltName=DNS:$n`nextendedKeyUsage=serverAuth`n" | Set-Content -Encoding ascii "$n.ext"
+            & $o x509 -req -in "$n.csr" -CA "$st\ca.crt" -CAkey "$st\ca.key" -CAcreateserial -days 30 -extfile "$n.ext" -out "$n.crt" 2>$null
+            $c = [Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path "$n.crt").Path)
+            $ch = [Security.Cryptography.X509Certificates.X509Chain]::new()
+            $ch.ChainPolicy.RevocationMode = 'NoCheck'
+            $ok = $ch.Build($c)
+            Write-Output "$n -> chain valid: $ok ($(($ch.ChainStatus | ForEach-Object Status) -join ', '))"
+            return $ok
+          }
+          # the positive control: the same CA, a .eth name, the same chain machinery
+          if (-not (Leaf 'control.eth')) { throw 'a .eth certificate from the CA did not validate: the test proves nothing' }
+          if (Leaf 'google.com') { throw 'a google.com certificate signed with the CA key VALIDATED' }
+      - name: (b) a later 0.0.0.0:443 bind while EnclaveDNS holds 127.0.0.3:443
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 443)
+          $l.Start()
+          Write-Output 'bind 0.0.0.0:443: OK'
+          $r = Invoke-WebRequest https://vitalik.eth/ -SkipHttpErrorCheck
+          if ($r.StatusCode -ne 503) { throw ".eth stopped working while 0.0.0.0:443 was bound: $($r.StatusCode)" }
+          Write-Output '127.0.0.3:443 still serves .eth meanwhile'
+          $l.Stop()
+      - name: (c) watchdog fails open within ~2 min when the client dies, and restores after
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          sc.exe config EnclaveDNS start= disabled | Out-Null
+          taskkill /F /FI "SERVICES eq EnclaveDNS" | Out-Null
+          $t0 = Get-Date
+          while (Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'EnclaveDNS' }) {
+            if (((Get-Date) - $t0).TotalSeconds -gt 180) { throw 'NRPT rules still in place 180 s after the client died' }
+            Start-Sleep 5
+          }
+          Write-Output "NRPT rules removed $([int]((Get-Date) - $t0).TotalSeconds) s after the client died"
+          Resolve-DnsName github.com -Type A | Out-Null
+          Write-Output 'DNS works through the network meanwhile'
+          Get-Content "$env:ProgramData\EnclaveDNS\watchdog.log"
+          sc.exe config EnclaveDNS start= auto | Out-Null
+          sc.exe start EnclaveDNS | Out-Null
+          $t0 = Get-Date
+          while (-not (Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'EnclaveDNS' })) {
+            if (((Get-Date) - $t0).TotalSeconds -gt 180) { throw 'NRPT rules not restored 180 s after the client came back' }
+            Start-Sleep 5
+          }
+          Write-Output "NRPT rules restored $([int]((Get-Date) - $t0).TotalSeconds) s after the client came back"
+          $eth = Resolve-DnsName playhh.eth -Type A -DnsOnly
+          if (-not ($eth.IPAddress -contains '127.0.0.3')) { throw "playhh.eth not back on the gateway" }
+      - name: uninstall with the installer's uninstaller
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Process "$env:ProgramFiles\EnclaveDNS\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          $t0 = Get-Date
+          while ((Get-Service EnclaveDNS -ErrorAction SilentlyContinue) -or (Test-Path "$env:ProgramFiles\EnclaveDNS\enclavedns.exe")) {
+            if (((Get-Date) - $t0).TotalSeconds -gt 120) { throw 'the uninstaller did not finish' }
+            Start-Sleep 2
+          }
+          if (Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'EnclaveDNS*' }) { throw 'NRPT rules left behind' }
+          if (Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*EnclaveDNS*' }) { throw 'the CA is still trusted' }
+          schtasks /Query /TN '\EnclaveDNS\Watchdog' 2>$null; if ($LASTEXITCODE -eq 0) { throw 'the watchdog task is left behind' }
+          if (Test-Path "$env:ProgramData\EnclaveDNS\state") { throw 'the CA key folder is left behind' }
+          Resolve-DnsName github.com -Type A | Out-Null
+          Write-Output 'uninstalled: no service, no NRPT rules, no CA, no task, no key; DNS works'
+      - if: failure()
+        shell: pwsh
+        run: |
+          sc.exe query EnclaveDNS
+          Get-Content "$env:ProgramData\EnclaveDNS\enclavedns.log" -ErrorAction SilentlyContinue
+          Get-Content "$env:ProgramData\EnclaveDNS\watchdog.log" -ErrorAction SilentlyContinue
+          Get-DnsClientNrptRule | Format-Table Namespace, NameServers, Comment
+          netstat -ano | Select-String ':53 |:80 |:443 '
 
   android:
     runs-on: ubuntu-24.04

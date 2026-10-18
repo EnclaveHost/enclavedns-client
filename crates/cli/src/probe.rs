@@ -72,3 +72,27 @@ pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, Strin
         .await
         .map_err(|_| format!("{addr}: no answer"))?
 }
+
+/// Is the client process alive? A question it answers itself, without the
+/// network (Firefox's DoH canary): any DNS answer at all counts.
+pub fn alive(dns: SocketAddr, tries: u32) -> bool {
+    let rt = crate::runtime();
+    for i in 0..tries {
+        let ok = rt
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self::dns(dns, "use-application-dns.net", "A"),
+                )
+                .await
+            })
+            .is_ok_and(|r| r.is_ok());
+        if ok {
+            return true;
+        }
+        if i + 1 < tries {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    false
+}

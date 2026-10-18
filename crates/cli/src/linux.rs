@@ -262,6 +262,97 @@ fn wait_answering(server: SocketAddr) -> bool {
     false
 }
 
+fn our_resolv(cfg: &enclavedns_core::Config, net: &Network) -> String {
+    let mut text = String::from(
+        "# written by `enclavedns enable`; `sudo enclavedns disable` restores the previous file\n",
+    );
+    if !net.domains.is_empty() {
+        text.push_str(&format!("search {}\n", net.domains.join(" ")));
+    }
+    for a in &cfg.dns_listen {
+        text.push_str(&format!("nameserver {}\n", a.ip()));
+    }
+    text.push_str("options edns0 trust-ad timeout:3 attempts:2\n");
+    text
+}
+
+/// Put the pre-`enable` resolv.conf back without forgetting it (the
+/// watchdog's fail-open; `disable` also deletes the copy).
+fn restore_saved_resolv() -> Result<(), String> {
+    let link = format!("{SYS}/resolv.conf.link");
+    let saved = format!("{SYS}/resolv.conf.saved");
+    if let Ok(target) = fs::read_to_string(&link) {
+        let _ = fs::remove_file(RESOLV);
+        std::os::unix::fs::symlink(target.trim(), RESOLV).map_err(|e| e.to_string())
+    } else if Path::new(&saved).exists() {
+        let _ = fs::remove_file(RESOLV);
+        fs::copy(&saved, RESOLV)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    } else {
+        Err("no saved resolv.conf".into())
+    }
+}
+
+fn write_ours(cfg: &enclavedns_core::Config) -> Result<(), String> {
+    let text = our_resolv(cfg, &network());
+    if fs::symlink_metadata(RESOLV).is_ok_and(|m| m.file_type().is_symlink()) {
+        fs::remove_file(RESOLV).map_err(|e| e.to_string())?;
+    }
+    fs::write(RESOLV, text).map_err(|e| e.to_string())
+}
+
+const SUSPENDED: &str = "/var/lib/enclavedns-system/watchdog-suspended";
+
+/// `enclavedns watchdog`, every minute (enclavedns-watchdog.timer): this
+/// machine's DNS must never depend on a dead client. When the client stops
+/// answering, restart it (killing it if it hangs); if it still does not
+/// answer, put the network's resolv.conf back so DNS fails open; point it
+/// at the client again once it answers.
+pub fn watchdog(ctx: &Ctx) -> Result<(), String> {
+    if !Path::new(&format!("{SYS}/state.json")).exists() {
+        return Ok(());
+    }
+    let cfg = ctx.config();
+    let dns = cfg
+        .dns_listen
+        .first()
+        .copied()
+        .ok_or("dns_listen is empty")?;
+    let suspended = Path::new(SUSPENDED).exists();
+    if !probe::alive(dns, 3) {
+        println!("the client does not answer on {dns}: restarting enclavedns.service");
+        let _ = sh(
+            "systemctl",
+            &["kill", "--signal=SIGKILL", "enclavedns.service"],
+        );
+        let _ = sh("systemctl", &["restart", "enclavedns.service"]);
+        let mut back = false;
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if probe::alive(dns, 1) {
+                back = true;
+                break;
+            }
+        }
+        if !back {
+            if !suspended {
+                restore_saved_resolv()?;
+                fs::write(SUSPENDED, "the client did not answer; the network's resolv.conf is back (DNS fails open)\n").map_err(|e| e.to_string())?;
+                println!("still no answer: /etc/resolv.conf is the network's again until the client answers");
+            }
+            return Ok(());
+        }
+        println!("the client answers again after a restart");
+    }
+    if suspended {
+        write_ours(&cfg)?;
+        let _ = fs::remove_file(SUSPENDED);
+        println!("the client answers: /etc/resolv.conf points at it again");
+    }
+    Ok(())
+}
+
 pub fn enable(ctx: &Ctx) -> Result<(), String> {
     if !is_root() {
         return Err("run it as root: sudo enclavedns enable".into());
@@ -343,16 +434,7 @@ sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
         sh("systemctl", &["reload", "NetworkManager.service"])?;
         state["networkmanager"] = true.into();
     }
-    let mut text = String::from(
-        "# written by `enclavedns enable`; `sudo enclavedns disable` restores the previous file\n",
-    );
-    if !net.domains.is_empty() {
-        text.push_str(&format!("search {}\n", net.domains.join(" ")));
-    }
-    for a in &cfg.dns_listen {
-        text.push_str(&format!("nameserver {}\n", a.ip()));
-    }
-    text.push_str("options edns0 trust-ad timeout:3 attempts:2\n");
+    let text = our_resolv(&cfg, &net);
     if meta.file_type().is_symlink() {
         fs::remove_file(RESOLV).map_err(|e| e.to_string())?;
     }
@@ -363,6 +445,17 @@ sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
         serde_json::to_vec_pretty(&state).unwrap(),
     )
     .map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(SUSPENDED);
+    if sh(
+        "systemctl",
+        &["enable", "--now", "enclavedns-watchdog.timer"],
+    )
+    .is_ok()
+    {
+        println!(
+            "   watchdog on: if the client stops answering, DNS falls back to the network's own"
+        );
+    }
 
     match sh("getent", &["hosts", "enclave.host"]) {
         Ok(o) if !o.trim().is_empty() => println!(
@@ -407,11 +500,19 @@ pub fn disable(_ctx: &Ctx) -> Result<(), String> {
         let _ = sh("nmcli", &["general", "reload", "dns-rc"]);
     }
     let _ = fs::remove_file(format!("{SYS}/state.json"));
+    let _ = fs::remove_file(SUSPENDED);
+    let _ = sh(
+        "systemctl",
+        &["disable", "--now", "enclavedns-watchdog.timer"],
+    );
     println!("DONE: DNS is back to what it was before `enclavedns enable`");
     Ok(())
 }
 
 pub fn system_status() -> String {
+    if Path::new(SUSPENDED).exists() {
+        return "uses the NETWORK's DNS for now: the watchdog put the old resolv.conf back because the client stopped answering".into();
+    }
     let t = fs::read_to_string(RESOLV).unwrap_or_default();
     if t.contains("`enclavedns enable`") {
         "uses the client (/etc/resolv.conf)".into()

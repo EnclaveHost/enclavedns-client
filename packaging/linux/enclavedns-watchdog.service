@@ -1,0 +1,8 @@
+[Unit]
+Description=EnclaveDNS watchdog: restart a client that stopped answering; if it stays down, DNS falls back to the network's own
+Documentation=https://github.com/EnclaveHost/enclavedns-client
+After=enclavedns.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/enclavedns watchdog

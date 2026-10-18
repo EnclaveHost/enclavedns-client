@@ -1,6 +1,6 @@
 # Maintainer: stevedefacto (https://aur.archlinux.org/account/stevedefacto)
 pkgname=enclavedns
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="EnclaveDNS client: DNS through EnclaveDNS (DNSSEC validated in an attested enclave), and .eth sites in the browser"
 arch=('x86_64' 'aarch64')
@@ -40,6 +40,8 @@ package() {
   cd "enclavedns-client-$pkgver"
   install -Dm755 target/release/enclavedns "$pkgdir/usr/bin/enclavedns"
   install -Dm644 packaging/linux/enclavedns.service "$pkgdir/usr/lib/systemd/system/enclavedns.service"
+  install -Dm644 packaging/linux/enclavedns-watchdog.service "$pkgdir/usr/lib/systemd/system/enclavedns-watchdog.service"
+  install -Dm644 packaging/linux/enclavedns-watchdog.timer "$pkgdir/usr/lib/systemd/system/enclavedns-watchdog.timer"
   install -Dm644 packaging/linux/enclavedns.sysusers "$pkgdir/usr/lib/sysusers.d/enclavedns.conf"
   install -Dm644 packaging/linux/config.toml "$pkgdir/etc/enclavedns/config.toml"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

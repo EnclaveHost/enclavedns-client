@@ -20,6 +20,9 @@ usage: enclavedns [--config FILE] [--state DIR] <command>
   enable              point this machine's DNS at the client and trust its
                       .eth-only CA for HTTPS (administrator/root)
   disable             undo `enable` (administrator/root)
+  watchdog            one check, run every minute by the service's timer/task:
+                      restart a client that stopped answering, and if it
+                      stays down, give DNS back to the network until it answers
   query NAME [TYPE]   ask the client one question (default type A)
   ca                  print the .eth CA certificate (PEM) and where it lives
   version
@@ -84,6 +87,7 @@ fn main() {
         "ca" => ca(&ctx),
         "enable" => platform_enable(&ctx, true),
         "disable" => platform_enable(&ctx, false),
+        "watchdog" => watchdog(&ctx),
         "version" | "--version" | "-V" => println!("enclavedns {}", env!("CARGO_PKG_VERSION")),
         #[cfg(windows)]
         "service" => windows::service(&ctx, rest),
@@ -131,6 +135,21 @@ fn platform_enable(ctx: &Ctx, on: bool) {
             "enable/disable exist on Linux and Windows; point your DNS at the client by hand"
                 .into(),
         )
+    };
+    if let Err(e) = r {
+        die(&e)
+    }
+}
+
+fn watchdog(ctx: &Ctx) {
+    #[cfg(target_os = "linux")]
+    let r = linux::watchdog(ctx);
+    #[cfg(windows)]
+    let r = windows::watchdog(ctx);
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let r: Result<(), String> = {
+        let _ = ctx;
+        Ok(())
     };
     if let Err(e) = r {
         die(&e)

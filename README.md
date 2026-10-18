@@ -34,6 +34,10 @@ ENS (`.eth`) names natively. This client makes a device use it:
   router's own zone) go to the network's own DNS servers.
 - Firefox is told to keep its own DNS-over-HTTPS off (`use-application-dns.net`),
   so it uses the system resolver too.
+- **DNS never depends on a dead client.** A watchdog (a systemd timer on Linux,
+  a SYSTEM scheduled task on Windows) checks every minute that the client
+  answers. If it does not, it restarts it; if it still does not, it gives DNS
+  back to the network's own servers until the client answers again.
 
 ## Install
 
@@ -57,7 +61,7 @@ Download `enclavedns-<version>-linux-<arch>.tar.gz` from the
 
 ```sh
 sudo install -m755 enclavedns /usr/bin/enclavedns
-sudo install -m644 enclavedns.service /etc/systemd/system/
+sudo install -m644 enclavedns.service enclavedns-watchdog.service enclavedns-watchdog.timer /etc/systemd/system/
 sudo install -m644 enclavedns.sysusers /usr/lib/sysusers.d/enclavedns.conf && sudo systemd-sysusers
 sudo install -Dm644 config.toml /etc/enclavedns/config.toml
 sudo systemctl enable --now enclavedns

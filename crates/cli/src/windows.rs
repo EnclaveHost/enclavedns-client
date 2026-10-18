@@ -25,6 +25,7 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 const NAME: &str = "EnclaveDNS";
 const NRPT_COMMENT: &str = "EnclaveDNS";
+const WATCHDOG_TASK: &str = "\\EnclaveDNS\\Watchdog";
 const CA_CN: &str = "EnclaveDNS Local CA (this machine only, .eth and .ens names)";
 
 fn powershell(script: &str) -> Result<String, String> {
@@ -260,11 +261,33 @@ fn install(ctx: &Ctx) -> Result<(), String> {
         actions: Some(vec![restart.clone(), restart.clone(), restart]),
     });
     let _ = s.set_failure_actions_on_non_crash_failures(true);
-    println!("service {NAME} installed (starts with Windows)");
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    run(
+        "schtasks",
+        &[
+            "/Create",
+            "/TN",
+            WATCHDOG_TASK,
+            "/TR",
+            &format!("\"{}\" watchdog", exe.display()),
+            "/SC",
+            "MINUTE",
+            "/MO",
+            "1",
+            "/RU",
+            "SYSTEM",
+            "/RL",
+            "HIGHEST",
+            "/F",
+        ],
+    )
+    .map_err(|e| format!("the watchdog task: {e}"))?;
+    println!("service {NAME} installed (starts with Windows), watchdog task {WATCHDOG_TASK} every minute");
     Ok(())
 }
 
 fn uninstall() -> Result<(), String> {
+    let _ = run("schtasks", &["/Delete", "/TN", WATCHDOG_TASK, "/F"]);
     let m = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| e.to_string())?;
     let s = match m.open_service(
@@ -304,6 +327,127 @@ fn control(start: bool) -> Result<(), String> {
 }
 
 // ------------------------------------------------------------ enable/disable
+
+fn enabled_marker() -> std::path::PathBuf {
+    crate::paths::program_data().join("enabled")
+}
+
+fn watchdog_state() -> std::path::PathBuf {
+    crate::paths::program_data().join("watchdog-suspended")
+}
+
+/// The NRPT rules: one per connection-specific suffix to that network's own
+/// DNS, and "." to the client. Replaces any earlier EnclaveDNS rules.
+fn apply_nrpt(cfg: &enclavedns_core::Config) -> Result<String, String> {
+    let servers: Vec<String> = cfg.dns_listen.iter().map(|a| a.ip().to_string()).collect();
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+Get-DnsClientNrptRule | Where-Object {{ $_.Comment -like '{c}*' }} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}
+$seen = @{{}}
+Get-DnsClient | Where-Object {{ $_.ConnectionSpecificSuffix }} | ForEach-Object {{
+  $suffix = $_.ConnectionSpecificSuffix.Trim('.')
+  $srv = (Get-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses |
+    Where-Object {{ $_ -notlike '127.*' }}
+  if ($srv -and -not $seen.ContainsKey($suffix)) {{
+    $seen[$suffix] = 1
+    Add-DnsClientNrptRule -Namespace ".$suffix" -NameServers $srv -Comment '{c} local network' | Out-Null
+    Write-Output "   *.$suffix -> $($srv -join ', ')"
+  }}
+}}
+Add-DnsClientNrptRule -Namespace '.' -NameServers @({s}) -Comment '{c}' | Out-Null
+Clear-DnsClientCache
+Write-Output '   every other name -> the client'"#,
+        c = NRPT_COMMENT,
+        s = servers
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    powershell(&script)
+}
+
+fn remove_nrpt() -> Result<(), String> {
+    powershell(&format!(
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -like '{NRPT_COMMENT}*' }} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}; Clear-DnsClientCache"
+    ))
+    .map(|_| ())
+}
+
+fn watchdog_log(msg: &str) {
+    use std::io::Write;
+    let p = crate::paths::program_data().join("watchdog.log");
+    if std::fs::metadata(&p).is_ok_and(|m| m.len() > 256 << 10) {
+        let _ = std::fs::rename(&p, p.with_extension("log.old"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{t} {msg}");
+    }
+    println!("{msg}");
+}
+
+/// `enclavedns watchdog`, every minute as SYSTEM (the \EnclaveDNS\Watchdog
+/// task): this PC's DNS must never depend on a dead client. When the client
+/// stops answering, restart it (killing it if it hangs); if it still does
+/// not answer, remove the NRPT rules so DNS fails open to the network's own
+/// servers; put them back once it answers again.
+pub fn watchdog(ctx: &Ctx) -> Result<(), String> {
+    if !enabled_marker().exists() {
+        return Ok(());
+    }
+    let cfg = ctx.config();
+    let dns = cfg
+        .dns_listen
+        .first()
+        .copied()
+        .ok_or("dns_listen is empty")?;
+    let suspended = watchdog_state().exists();
+    if !probe::alive(dns, 3) {
+        watchdog_log(&format!(
+            "the client does not answer on {dns}: restarting the {NAME} service"
+        ));
+        let _ = control(false);
+        std::thread::sleep(Duration::from_secs(3));
+        // a hung process ignores the stop: end it
+        let _ = run("taskkill", &["/F", "/FI", &format!("SERVICES eq {NAME}")]);
+        let _ = control(true);
+        let mut back = false;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_secs(2));
+            if probe::alive(dns, 1) {
+                back = true;
+                break;
+            }
+        }
+        if !back {
+            if !suspended {
+                remove_nrpt()?;
+                std::fs::write(
+                    watchdog_state(),
+                    "the client did not answer; NRPT rules removed (DNS fails open)\n",
+                )
+                .map_err(|e| e.to_string())?;
+                watchdog_log("still no answer: NRPT rules removed, this PC uses the network's DNS until the client answers again");
+            }
+            return Ok(());
+        }
+        watchdog_log("the client answers again after a restart");
+    }
+    if suspended {
+        apply_nrpt(&cfg)?;
+        let _ = std::fs::remove_file(watchdog_state());
+        watchdog_log("the client answers: NRPT rules restored");
+    }
+    Ok(())
+}
 
 fn wait_answering(server: std::net::SocketAddr) -> bool {
     let rt = crate::runtime();
@@ -347,32 +491,9 @@ pub fn enable(ctx: &Ctx) -> Result<(), String> {
         );
     }
     println!("== 3/3 send this computer's DNS to the client (NRPT)");
-    let servers: Vec<String> = cfg.dns_listen.iter().map(|a| a.ip().to_string()).collect();
-    let script = format!(
-        r#"$ErrorActionPreference = 'Stop'
-Get-DnsClientNrptRule | Where-Object {{ $_.Comment -like '{c}*' }} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}
-$seen = @{{}}
-Get-DnsClient | Where-Object {{ $_.ConnectionSpecificSuffix }} | ForEach-Object {{
-  $suffix = $_.ConnectionSpecificSuffix.Trim('.')
-  $srv = (Get-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses |
-    Where-Object {{ $_ -notlike '127.*' }}
-  if ($srv -and -not $seen.ContainsKey($suffix)) {{
-    $seen[$suffix] = 1
-    Add-DnsClientNrptRule -Namespace ".$suffix" -NameServers $srv -Comment '{c} local network' | Out-Null
-    Write-Output "   *.$suffix -> $($srv -join ', ')"
-  }}
-}}
-Add-DnsClientNrptRule -Namespace '.' -NameServers @({s}) -Comment '{c}' | Out-Null
-Clear-DnsClientCache
-Write-Output '   every other name -> the client'"#,
-        c = NRPT_COMMENT,
-        s = servers
-            .iter()
-            .map(|s| format!("'{s}'"))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    print!("{}", powershell(&script)?);
+    print!("{}", apply_nrpt(&cfg)?);
+    std::fs::write(enabled_marker(), "enabled by `enclavedns enable`; the watchdog keeps the NRPT rules only while the client answers\n")
+        .map_err(|e| e.to_string())?;
     match powershell("(Resolve-DnsName -Name enclave.host -Type A -DnsOnly -QuickTimeout | Select-Object -First 1).IPAddress") {
         Ok(ip) if !ip.trim().is_empty() => println!("DONE: this computer resolves through EnclaveDNS (enclave.host -> {})", ip.trim()),
         _ => println!("WARNING: enclave.host did not resolve through the system; check `enclavedns status`"),
@@ -381,9 +502,9 @@ Write-Output '   every other name -> the client'"#,
 }
 
 pub fn disable(_ctx: &Ctx) -> Result<(), String> {
-    powershell(&format!(
-        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -like '{NRPT_COMMENT}*' }} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}; Clear-DnsClientCache"
-    ))?;
+    let _ = std::fs::remove_file(enabled_marker());
+    let _ = std::fs::remove_file(watchdog_state());
+    remove_nrpt()?;
     println!("DNS policy rules removed");
     match run("certutil", &["-delstore", "Root", CA_CN]) {
         Ok(_) => println!("CA no longer trusted"),
@@ -394,6 +515,9 @@ pub fn disable(_ctx: &Ctx) -> Result<(), String> {
 }
 
 pub fn system_status() -> String {
+    if watchdog_state().exists() {
+        return "uses the NETWORK's DNS for now: the watchdog removed the NRPT rules because the client stopped answering (see watchdog.log)".into();
+    }
     match powershell(&format!(
         "@(Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }}).Count"
     )) {

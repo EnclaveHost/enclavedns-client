@@ -16,6 +16,8 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=1
+# a hung client is killed quickly (the watchdog restarts it this way)
+TimeoutStopSec=5
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
