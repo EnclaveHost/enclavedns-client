@@ -49,7 +49,10 @@ jobs:
           ls -la /etc/resolv.conf
           sudo $E --state /tmp/encstate run > /tmp/daemon.log 2>&1 &
           for i in $(seq 1 30); do $E query enclave.host && break; sleep 1; done
+          sudo apt-get install -y -qq libnss3-tools > /dev/null
           sudo $E --state /tmp/encstate enable
+          # Chrome/Chromium on Linux trust local CAs only from the user's NSS database
+          certutil -d sql:$HOME/.pki/nssdb -L | grep -q 'EnclaveDNS Local CA'
           getent hosts enclave.host
           getent hosts playhh.eth | grep 127.0.0.3
           $E status
@@ -70,6 +73,7 @@ jobs:
           grep -q 'enclavedns enable' /etc/resolv.conf
           getent hosts enclave.host
           sudo $E --state /tmp/encstate disable
+          ! certutil -d sql:$HOME/.pki/nssdb -L | grep -q 'EnclaveDNS Local CA'
           test -L /etc/resolv.conf
           getent hosts enclave.host
       - if: failure()

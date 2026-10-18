@@ -72,7 +72,11 @@ sudo enclavedns enable
 
 `enable` handles NetworkManager, systemd-resolved and a plain
 `/etc/resolv.conf`, and trusts the CA with `update-ca-trust` (Arch, Fedora)
-or `update-ca-certificates` (Debian, Ubuntu).
+or `update-ca-certificates` (Debian, Ubuntu). Chrome and Chromium on Linux
+ignore the system store for local CAs and read only the user's NSS database,
+so `enable` also adds it to `~/.pki/nssdb` of the user who ran `sudo` (needs
+`certutil`: `nss` on Arch, `libnss3-tools` on Debian/Ubuntu). Other users:
+`certutil -d sql:$HOME/.pki/nssdb -A -t C,, -n "EnclaveDNS Local CA" -i /var/lib/enclavedns/ca.crt`.
 
 ### Windows
 

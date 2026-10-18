@@ -4,7 +4,7 @@ members = ["crates/core", "crates/cli", "android/rust"]
 default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license-file = "LICENSE"
 repository = "https://github.com/EnclaveHost/enclavedns-client"

@@ -197,6 +197,84 @@ fn network_servers_all() -> Vec<SocketAddr> {
     v
 }
 
+const NSS_NICK: &str = "EnclaveDNS Local CA (.eth and .ens only)";
+
+/// The user's NSS database (Chrome/Chromium on Linux), as that user.
+fn nss_db(user: &str) -> Option<String> {
+    let home = sh("getent", &["passwd", user])
+        .ok()?
+        .split(':')
+        .nth(5)?
+        .trim()
+        .to_string();
+    Some(format!("sql:{home}/.pki/nssdb"))
+}
+
+fn nss_add(user: &str, cert: &Path) -> Result<(), String> {
+    if sh("which", &["certutil"]).is_err() {
+        return Err("certutil is missing (install nss / libnss3-tools)".into());
+    }
+    let db = nss_db(user).ok_or("no home directory")?;
+    let dir = db.trim_start_matches("sql:").to_string();
+    if !Path::new(&format!("{dir}/cert9.db")).exists() {
+        sh("runuser", &["-u", user, "--", "mkdir", "-p", &dir])?;
+        sh(
+            "runuser",
+            &[
+                "-u",
+                user,
+                "--",
+                "certutil",
+                "-N",
+                "--empty-password",
+                "-d",
+                &db,
+            ],
+        )?;
+    }
+    // readable by the user: the anchor copy is 0644
+    let _ = sh(
+        "runuser",
+        &[
+            "-u", user, "--", "certutil", "-D", "-n", NSS_NICK, "-d", &db,
+        ],
+    );
+    sh(
+        "runuser",
+        &[
+            "-u",
+            user,
+            "--",
+            "certutil",
+            "-A",
+            "-t",
+            "C,,",
+            "-n",
+            NSS_NICK,
+            "-i",
+            &cert.display().to_string(),
+            "-d",
+            &db,
+        ],
+    )
+    .map(|_| ())
+}
+
+fn nss_remove(user: &str) {
+    if let Some(db) = nss_db(user) {
+        if sh(
+            "runuser",
+            &[
+                "-u", user, "--", "certutil", "-D", "-n", NSS_NICK, "-d", &db,
+            ],
+        )
+        .is_ok()
+        {
+            println!("CA no longer trusted by {user}'s Chrome/Chromium");
+        }
+    }
+}
+
 /// kubo's gateway and API from the invoking user's ~/.ipfs/config.
 fn kubo() -> Option<(String, String)> {
     let user = std::env::var("SUDO_USER").ok()?;
@@ -388,7 +466,13 @@ pub fn enable(ctx: &Ctx) -> Result<(), String> {
     if !is_root() {
         return Err("run it as root: sudo enclavedns enable".into());
     }
-    if Path::new("/etc/dnscrypt-proxy/undo-enclavedns.sh").exists() {
+    // the earlier dnscrypt-proxy setup, only while it still runs (its undo
+    // script stays behind after it has been undone)
+    if Path::new("/etc/dnscrypt-proxy/undo-enclavedns.sh").exists()
+        && (active("dnscrypt-proxy.service")
+            || active("dnscrypt-proxy-fallback.service")
+            || active("enclavedns-local.socket"))
+    {
         return Err(
             "the earlier dnscrypt-proxy setup is still installed; remove it first: \
 sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
@@ -442,9 +526,24 @@ sudo bash /etc/dnscrypt-proxy/undo-enclavedns.sh"
             sh(cmd, args)?;
             state["ca_anchor"] = anchor.display().to_string().into();
             println!(
-                "   trusted ({}); restart your browser to load it",
+                "   trusted system-wide ({}): Firefox, curl, most tools",
                 anchor.display()
             );
+            // Chrome and Chromium on Linux take local CAs only from the user's
+            // own NSS database (~/.pki/nssdb), not the system store
+            if let Some(user) = std::env::var("SUDO_USER")
+                .ok()
+                .filter(|u| !u.is_empty() && u != "root")
+            {
+                match nss_add(&user, &anchor) {
+                    Ok(()) => {
+                        state["nss_user"] = user.clone().into();
+                        println!("   trusted for {user}'s Chrome/Chromium (~/.pki/nssdb)");
+                    }
+                    Err(e) => println!("   not added to {user}'s Chrome/Chromium database: {e}"),
+                }
+            }
+            println!("   restart your browser to load it");
         }
         (Err(e), _) => println!(
             "   skipped: {}: {e} (HTTPS for .eth stays off)",
@@ -520,6 +619,9 @@ pub fn disable(_ctx: &Ctx) -> Result<(), String> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
+    if let Some(user) = state["nss_user"].as_str() {
+        nss_remove(user);
+    }
     if let Some(a) = state["ca_anchor"].as_str() {
         let _ = fs::remove_file(a);
         if let Some((_, cmd, args)) = trust_store() {
